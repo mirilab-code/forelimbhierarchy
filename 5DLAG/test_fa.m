@@ -1,0 +1,161 @@
+% =========
+% FA DEMO
+% =========
+%
+% This demo shows how we can use FA to study multi-population data. It's 
+% recommended to run this script section-by-section, rather than all at 
+% once (or put a break point before Section 2, as it may take a long time).
+%
+% Section 1 demonstrates how FA can be used for exploratory data
+% analysis.
+%
+%     Section 1a fits (to each group indepently) FA models with specified 
+%     numbers of latent dimensions. Optional arguments are explicitly 
+%     specified for the sake of demonstration.
+%
+%     Section 1b takes this model and performs basic inference of
+%     latent trajectories. It also demonstrates how to orthonormalize and
+%     order FA latents according to shared variance explained.
+%
+% Section 2 shows how to select the optimal dimensionality using
+% cross-validation (for each group independently, as in Section 1).
+%
+% Author:
+%     Evren Gokcen    egokcen@cmu.edu
+%
+% Last Revised:
+%     14 Apr 2021
+
+%% ==================
+% 0a) Load demo data
+% ======================
+
+% Synthetic data generated from a pCCA model
+clear all
+
+load('03272020_binned_spike_counts.mat');
+
+
+%% =======================
+% 0b) Set up parallelization
+% ===========================
+
+% If parallelize is true, all cross-validation folds will be analyzed in 
+% parallel using Matlab's parfor construct. If you have access to multiple 
+% cores, this provides significant speedup.
+parallelize = false;
+numWorkers = 2;      % Adjust this to your computer's specs
+
+%% =====================
+% 1a) Fitting a FA model
+% ========================
+
+% Let's explicitly define all of the optional arguments, for
+% the sake of demonstration:
+runIdx = 5;           % Results will be saved in baseDir/mat_results/runXXX/, where
+                      % XXX is runIdx. Use a new runIdx for each dataset.
+baseDir = '.';        % Base directory where results will be saved
+overwriteExisting = true; % Control whether existing results files are overwritten
+saveData = false;     % Set to true to save train and test data (not recommended)
+binWidth = 20;        % Sample period / spike count bin width, in units of time (e.g., ms)
+numFolds = 0;         % Number of cross-validation folds (0 means no cross-validation)
+xDims = {6, 6};       % The number of latents for each group
+yDims = [30 30];      % Number of observed features (neurons) in each group (area)
+maxIters = 1e8;       % Limit the number of EM iterations (not recommended, in general)
+randomSeed = 0;       % Seed the random number generator, for reproducibility
+numGroups = length(yDims); % Number of observation groups in the data
+
+fit_fa(runIdx, all_seq, ...
+       'baseDir', baseDir, ...
+       'binWidth', binWidth, ...
+       'numFolds', numFolds, ...
+       'xDims', xDims, ...
+       'yDims', yDims, ...
+       'maxIters', maxIters, ...
+       'parallelize', false, ...  % Only relevant if cross-validating
+       'randomSeed', randomSeed, ...
+       'overwriteExisting', overwriteExisting, ...
+       'saveData', saveData);
+
+%% =====================================
+% 1b) Explore extracted latent trajectories
+% ==========================================
+
+% Convert data in seq format to format compatible with FA functions
+seq_static = seq2pcca(all_seq, yDims, 'datafield', 'y'); % Borrowing code from pCCA pack
+
+for groupIdx = 1:numGroups
+    % Retrieve the fitted model of interest
+    res = getModel_fa(runIdx, groupIdx, xDims{groupIdx}, 'baseDir', baseDir);
+
+    % Infer unordered latents
+    [Xinferred, ~] = fa_estep(seq_static{groupIdx}, res.estParams);
+    % Convert inferred latents back into seq format
+    seqEst = segmentByTrial(all_seq, Xinferred.mean, 'xsm');
+    % Plot unordered latents vs time
+    plotDimsVsTime(seqEst, 'xsm', res.binWidth, ...
+                   'nPlotMax', 1, ...
+                   'nCol', res.xDim, ...
+                   'plotSingle', true, ...
+                   'plotMean', true, ...
+                   'units', 'ms');
+                  
+    % Orthonormalize and order latents according to shared variance
+    % explained.
+    xspec = sprintf('xorth%02d', res.xDim);
+    [Xorth, Corth] = orthogonalize(Xinferred.mean, res.estParams.C);
+    seqEst = segmentByTrial(seqEst, Xorth, xspec);
+    plotDimsVsTime(seqEst, xspec, res.binWidth, ...
+                   'nPlotMax', 20, ...
+                   'nCol', res.xDim, ...
+                   'plotSingle', true, ...
+                   'plotMean', true, ...
+                   'units', 'ms');
+
+    % Visualize the top three orthonormalized latents in 3D space
+    plotTraj(seqEst, xspec, ...
+             'dimsToPlot', 1:3, ...
+             'nPlotMax', 1, ...
+             'plotSingle', true, ...
+             'plotMean', true);
+end
+
+%% ==========================
+% 2) Cross-validate FA models
+%  =============================
+
+% Change other input arguments as appropriate
+runIdx = 6;
+numFolds = 4;
+xDims = {0:yDims(1)-1, 0:yDims(2)-1}; % Sweep over these dimensionalities
+
+fit_fa(runIdx, all_seq, ...
+       'baseDir', baseDir, ...
+       'binWidth', binWidth, ...
+       'numFolds', numFolds, ...
+       'xDims', xDims, ...
+       'yDims', yDims, ...
+       'maxIters', maxIters, ...
+       'parallelize', parallelize, ...
+       'randomSeed', randomSeed, ...
+       'numWorkers', numWorkers, ...
+       'overwriteExisting', overwriteExisting, ...
+       'saveData', saveData);
+
+%% Get cross-validation results
+[cvResults, bestModels] = getCrossValResults_fa(runIdx, 'baseDir', baseDir);
+
+% Plot cross-validated performance vs estimated dimensionality
+plotPerfvsDim_fa(cvResults, ...
+                 'bestModels', bestModels);
+               
+% Find a conservative estimate of optimal dimensionality.
+cutoffPC = 0.95;
+d_shared = nan(1,numGroups);
+for groupIdx = 1:numGroups
+    d_shared(groupIdx) ...
+        = findSharedDimCutoff_fa(cvResults{groupIdx}(bestModels(groupIdx)).estParams, ...
+                                 cutoffPC, ...
+                                 'plotSpec', true);
+end
+        
